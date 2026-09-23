@@ -1,4 +1,13 @@
-export type ScanContentType = 'url' | 'wifi' | 'email' | 'phone' | 'text';
+export type ScanContentType =
+  | 'url'
+  | 'wifi'
+  | 'email'
+  | 'phone'
+  | 'vcard'
+  | 'upi'
+  | 'geo'
+  | 'crypto'
+  | 'text';
 
 export interface ScannedResult {
   id: string;
@@ -12,6 +21,19 @@ export interface ScannedResult {
     password?: string;
     phoneNumber?: string;
     emailAddress?: string;
+    contactName?: string;
+    contactOrg?: string;
+    contactTitle?: string;
+    contactPhone?: string;
+    contactEmail?: string;
+    contactUrl?: string;
+    upiPayee?: string;
+    upiId?: string;
+    upiAmount?: string;
+    latitude?: string;
+    longitude?: string;
+    cryptoCurrency?: string;
+    cryptoAddress?: string;
   };
 }
 

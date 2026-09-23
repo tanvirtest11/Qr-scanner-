@@ -5,7 +5,7 @@ import CameraErrorBoundary from './components/CameraErrorBoundary';
 import ResultDisplay from './components/ResultDisplay';
 import ScanHistory from './components/ScanHistory';
 import { ScannedResult } from './types';
-import { parseQRContent, playSuccessBeep, playClickFeedback, triggerHaptic } from './utils/qrParser';
+import { parseQRContent, playSuccessBeep, playClickFeedback, triggerHaptic, decodeQRFromImageFile } from './utils/qrParser';
 
 const SOUND_KEY = 'qr_scanner_sound_enabled';
 const HISTORY_KEY = 'qr_scanner_scan_history';
@@ -92,6 +92,30 @@ export default function App() {
       return [newResult, ...filtered].slice(0, 100);
     });
   }, [soundEnabled]);
+
+  // Global clipboard paste support (paste image from clipboard or screenshot)
+  useEffect(() => {
+    const handlePaste = async (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.startsWith('image/')) {
+          const file = items[i].getAsFile();
+          if (file) {
+            e.preventDefault();
+            const decoded = await decodeQRFromImageFile(file);
+            if (decoded) {
+              handleScanSuccess(decoded);
+            }
+          }
+        }
+      }
+    };
+
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, [handleScanSuccess]);
 
   const handleReset = () => {
     playClickFeedback();

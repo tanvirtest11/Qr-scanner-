@@ -9,9 +9,10 @@ export function parseQRContent(rawText: string): {
   metadata?: ScannedResult['metadata'];
 } {
   const trimmed = rawText.trim();
+  const lower = trimmed.toLowerCase();
 
-  // Check for Wi-Fi format: WIFI:T:WPA;S:MyNetwork;P:password;;
-  if (trimmed.startsWith('WIFI:') || trimmed.startsWith('wifi:')) {
+  // 1. Wi-Fi: WIFI:T:WPA;S:MyNetwork;P:password;;
+  if (lower.startsWith('wifi:')) {
     const ssidMatch = trimmed.match(/S:([^;]+)/i);
     const passMatch = trimmed.match(/P:([^;]+)/i);
     const typeMatch = trimmed.match(/T:([^;]+)/i);
@@ -26,9 +27,128 @@ export function parseQRContent(rawText: string): {
     };
   }
 
-  // Check for URLs
+  // 2. UPI Payment: upi://pay?pa=...&pn=...&am=...
+  if (lower.startsWith('upi://pay') || lower.startsWith('upi:')) {
+    try {
+      const url = new URL(trimmed.startsWith('upi://') ? trimmed : `upi://${trimmed.replace(/^upi:/, '')}`);
+      const pa = url.searchParams.get('pa') || '';
+      const pn = url.searchParams.get('pn') || '';
+      const am = url.searchParams.get('am') || '';
+
+      return {
+        type: 'upi',
+        metadata: {
+          upiId: pa,
+          upiPayee: pn ? decodeURIComponent(pn) : undefined,
+          upiAmount: am ? am : undefined,
+        },
+      };
+    } catch {
+      const paMatch = trimmed.match(/[?&]pa=([^&]+)/i);
+      const pnMatch = trimmed.match(/[?&]pn=([^&]+)/i);
+      const amMatch = trimmed.match(/[?&]am=([^&]+)/i);
+      return {
+        type: 'upi',
+        metadata: {
+          upiId: paMatch ? decodeURIComponent(paMatch[1]) : undefined,
+          upiPayee: pnMatch ? decodeURIComponent(pnMatch[1]) : undefined,
+          upiAmount: amMatch ? amMatch[1] : undefined,
+        },
+      };
+    }
+  }
+
+  // 3. vCard / Contact Card (BEGIN:VCARD ... END:VCARD or MECARD:...)
+  if (lower.includes('begin:vcard') || lower.startsWith('mecard:')) {
+    let name: string | undefined;
+    let phone: string | undefined;
+    let email: string | undefined;
+    let org: string | undefined;
+    let title: string | undefined;
+    let url: string | undefined;
+
+    if (lower.includes('begin:vcard')) {
+      const fnMatch = trimmed.match(/FN:(.+)/i);
+      const nMatch = trimmed.match(/N:(.+)/i);
+      name = fnMatch ? fnMatch[1].trim() : (nMatch ? nMatch[1].replace(/;/g, ' ').trim() : undefined);
+
+      const telMatch = trimmed.match(/TEL(?:;[^:]+)?:(.+)/i);
+      phone = telMatch ? telMatch[1].trim() : undefined;
+
+      const emailMatch = trimmed.match(/EMAIL(?:;[^:]+)?:(.+)/i);
+      email = emailMatch ? emailMatch[1].trim() : undefined;
+
+      const orgMatch = trimmed.match(/ORG:(.+)/i);
+      org = orgMatch ? orgMatch[1].trim() : undefined;
+
+      const titleMatch = trimmed.match(/TITLE:(.+)/i);
+      title = titleMatch ? titleMatch[1].trim() : undefined;
+
+      const urlMatch = trimmed.match(/URL:(.+)/i);
+      url = urlMatch ? urlMatch[1].trim() : undefined;
+    } else {
+      // MECARD format: MECARD:N:Name;TEL:12345;EMAIL:test@test.com;;
+      const nMatch = trimmed.match(/N:([^;]+)/i);
+      const telMatch = trimmed.match(/TEL:([^;]+)/i);
+      const emailMatch = trimmed.match(/EMAIL:([^;]+)/i);
+      const orgMatch = trimmed.match(/ORG:([^;]+)/i);
+
+      name = nMatch ? nMatch[1] : undefined;
+      phone = telMatch ? telMatch[1] : undefined;
+      email = emailMatch ? emailMatch[1] : undefined;
+      org = orgMatch ? orgMatch[1] : undefined;
+    }
+
+    return {
+      type: 'vcard',
+      metadata: {
+        contactName: name || 'Contact',
+        contactPhone: phone,
+        contactEmail: email,
+        contactOrg: org,
+        contactTitle: title,
+        contactUrl: url,
+      },
+    };
+  }
+
+  // 4. Geo location: geo:37.786971,-122.399677 or Google Maps URL
+  if (lower.startsWith('geo:')) {
+    const coords = trimmed.replace(/^geo:/i, '').split('?')[0].split(',');
+    if (coords.length >= 2) {
+      return {
+        type: 'geo',
+        metadata: {
+          latitude: coords[0].trim(),
+          longitude: coords[1].trim(),
+        },
+      };
+    }
+  }
+
+  // 5. Crypto addresses: bitcoin:, ethereum:, solana:
+  if (lower.startsWith('bitcoin:') || lower.startsWith('ethereum:') || lower.startsWith('solana:') || /^0x[a-fA-F0-9]{40}$/.test(trimmed)) {
+    const isBtc = lower.startsWith('bitcoin:');
+    const isEth = lower.startsWith('ethereum:') || /^0x[a-fA-F0-9]{40}$/.test(trimmed);
+    const isSol = lower.startsWith('solana:');
+
+    let address = trimmed;
+    if (isBtc) address = trimmed.replace(/^bitcoin:/i, '').split('?')[0];
+    if (isEth) address = trimmed.replace(/^ethereum:/i, '').split('?')[0];
+    if (isSol) address = trimmed.replace(/^solana:/i, '').split('?')[0];
+
+    return {
+      type: 'crypto',
+      metadata: {
+        cryptoCurrency: isBtc ? 'Bitcoin (BTC)' : (isEth ? 'Ethereum (ETH)' : (isSol ? 'Solana (SOL)' : 'Crypto')),
+        cryptoAddress: address,
+      },
+    };
+  }
+
+  // 6. URLs
   const urlRegex = /^(https?:\/\/[^\s]+|www\.[^\s]+|[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\/[^\s]*)$/i;
-  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+  if (lower.startsWith('http://') || lower.startsWith('https://')) {
     return {
       type: 'url',
       metadata: {
@@ -44,8 +164,8 @@ export function parseQRContent(rawText: string): {
     };
   }
 
-  // Check for mailto:
-  if (trimmed.startsWith('mailto:')) {
+  // 7. Mailto
+  if (lower.startsWith('mailto:')) {
     const email = trimmed.replace(/^mailto:/i, '').split('?')[0];
     return {
       type: 'email',
@@ -55,9 +175,9 @@ export function parseQRContent(rawText: string): {
     };
   }
 
-  // Check for tel: or phone number
-  if (trimmed.startsWith('tel:')) {
-    const phone = trimmed.replace(/^tel:/i, '');
+  // 8. Tel / Phone
+  if (lower.startsWith('tel:') || lower.startsWith('telprompt:')) {
+    const phone = trimmed.replace(/^(tel|telprompt):/i, '');
     return {
       type: 'phone',
       metadata: {
@@ -66,7 +186,7 @@ export function parseQRContent(rawText: string): {
     };
   }
 
-  // Default to plain text
+  // Default: Plain Text
   return {
     type: 'text',
   };
@@ -230,8 +350,6 @@ export async function decodeQRFromCanvas(canvas: HTMLCanvasElement): Promise<str
 
 /**
  * High-accuracy QR code decoder from an Image file or Blob
- * Uses native BarcodeDetector if available, followed by multi-scale & multi-region jsQR scanning
- * to effortlessly detect tiny QR codes inside high-res phone screenshots without manual cropping.
  */
 export async function decodeQRFromImageFile(file: File): Promise<string | null> {
   return new Promise((resolve) => {

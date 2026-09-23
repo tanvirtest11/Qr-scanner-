@@ -15,6 +15,9 @@ import {
   Moon,
   Sun,
   Flashlight,
+  Play,
+  ShieldCheck,
+  ScanLine,
 } from 'lucide-react';
 import ImageCropperModal from './ImageCropperModal';
 import { playClickFeedback, triggerHaptic } from '../utils/qrParser';
@@ -33,6 +36,7 @@ export default function CameraScanner({ onScan, isPaused }: CameraScannerProps) 
   const camerasRef = useRef<MediaDeviceInfo[]>([]);
   const isStartingRef = useRef<boolean>(false);
 
+  const [isScannerStarted, setIsScannerStarted] = useState<boolean>(false);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [permissionState, setPermissionState] = useState<'prompt' | 'granted' | 'denied' | 'unknown'>('unknown');
   const [isRetrying, setIsRetrying] = useState<boolean>(false);
@@ -49,16 +53,18 @@ export default function CameraScanner({ onScan, isPaused }: CameraScannerProps) 
   const [selectedCropFile, setSelectedCropFile] = useState<File | null>(null);
   const [showCropModal, setShowCropModal] = useState<boolean>(false);
 
-  // Stop media tracks cleanly
+  // Stop media tracks cleanly and release hardware sensors immediately
   const stopCamera = useCallback(() => {
-    console.group('CameraScanner: stopCamera');
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
     if (streamRef.current) {
       const tracks = streamRef.current.getTracks();
-      console.log(`Stopping ${tracks.length} active tracks...`);
       tracks.forEach((track) => {
         try {
+          track.enabled = false;
           track.stop();
-          console.log(`Track ${track.id} (${track.kind}) stopped. ReadyState: ${track.readyState}`);
         } catch (err) {
           console.warn('Error stopping track:', err);
         }
@@ -66,9 +72,14 @@ export default function CameraScanner({ onScan, isPaused }: CameraScannerProps) 
       streamRef.current = null;
     }
     if (videoRef.current) {
+      try {
+        videoRef.current.pause();
+      } catch {
+        // ignore
+      }
       videoRef.current.srcObject = null;
     }
-    console.groupEnd();
+    setTorchOn(false);
   }, []);
 
   // Start camera stream safely without triggering recreation loops
@@ -117,31 +128,24 @@ export default function CameraScanner({ onScan, isPaused }: CameraScannerProps) 
       try {
         const primaryConstraints: MediaStreamConstraints = {
           video: targetDeviceId
-            ? {
+            ? ({
                 deviceId: { exact: targetDeviceId },
                 width: { ideal: 1920, max: 3840, min: 1280 },
                 height: { ideal: 1080, max: 2160, min: 720 },
                 frameRate: { ideal: 30, min: 15 },
-                // Advanced autofocus & exposure constraints supported by modern browsers
-                // @ts-expect-error standard advanced autofocus constraint
                 focusMode: { ideal: 'continuous' },
-                // @ts-expect-error exposure mode
                 exposureMode: { ideal: 'continuous' },
-                // @ts-expect-error white balance
                 whiteBalanceMode: { ideal: 'continuous' },
-              }
-            : {
+              } as MediaTrackConstraints)
+            : ({
                 facingMode: { ideal: 'environment' },
                 width: { ideal: 1920, max: 3840, min: 1280 },
                 height: { ideal: 1080, max: 2160, min: 720 },
                 frameRate: { ideal: 30, min: 15 },
-                // @ts-expect-error standard advanced autofocus constraint
                 focusMode: { ideal: 'continuous' },
-                // @ts-expect-error exposure mode
                 exposureMode: { ideal: 'continuous' },
-                // @ts-expect-error white balance
                 whiteBalanceMode: { ideal: 'continuous' },
-              },
+              } as MediaTrackConstraints),
           audio: false,
         };
         console.log('Attempting getUserMedia with Ultra-HD autofocus constraints:', primaryConstraints);
@@ -298,9 +302,16 @@ export default function CameraScanner({ onScan, isPaused }: CameraScannerProps) 
     }
   }, [stopCamera, currentCameraIndex]);
 
-  // Mount lifecycle: start camera on mount and teardown cleanly on unmount
-  useEffect(() => {
+  // Handler to explicitly start scanner on user interaction
+  const handleStartScanner = () => {
+    playClickFeedback();
+    triggerHaptic(35);
+    setIsScannerStarted(true);
     startCamera(0);
+  };
+
+  // Mount lifecycle: teardown cleanly on unmount (do not auto-start on mount)
+  useEffect(() => {
     return () => {
       stopCamera();
       if (animFrameRef.current) {
@@ -308,8 +319,7 @@ export default function CameraScanner({ onScan, isPaused }: CameraScannerProps) 
         animFrameRef.current = null;
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [stopCamera]);
 
   // Flip camera
   const handleSwitchCamera = () => {
@@ -356,10 +366,40 @@ export default function CameraScanner({ onScan, isPaused }: CameraScannerProps) 
     }
   };
 
-  // Resume camera automatically whenever isPaused becomes false or Crop modal is closed
+  // Stop hardware camera tracks whenever app is hidden, tab switched, page unloaded, or paused
   useEffect(() => {
-    if (!isPaused && !showCropModal) {
-      // If stream was stopped or is not active, re-initialize camera automatically
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        // App is minimized, locked, or user switched to another tab - completely stop camera
+        stopCamera();
+      } else if (document.visibilityState === 'visible' && isScannerStarted && !isPaused && !showCropModal) {
+        // User came back to the app - cleanly resume
+        startCamera(currentCameraIndex);
+      }
+    };
+
+    const handlePageHide = () => {
+      stopCamera();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('beforeunload', handlePageHide);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('beforeunload', handlePageHide);
+    };
+  }, [isScannerStarted, isPaused, showCropModal, startCamera, stopCamera, currentCameraIndex]);
+
+  // Handle Pause (e.g., scan results showing, crop modal open) and Resume
+  useEffect(() => {
+    if (isPaused || showCropModal) {
+      // When paused or reviewing scan result, release camera sensor to save battery and privacy
+      stopCamera();
+    } else if (!isPaused && !showCropModal && isScannerStarted && document.visibilityState === 'visible') {
+      // When resuming scanning, restart camera on demand
       const isStreamActive = streamRef.current && streamRef.current.active && streamRef.current.getVideoTracks().some(t => t.readyState === 'live');
       if (!isStreamActive) {
         startCamera(currentCameraIndex);
@@ -367,7 +407,7 @@ export default function CameraScanner({ onScan, isPaused }: CameraScannerProps) 
         videoRef.current.play().catch(() => {});
       }
     }
-  }, [isPaused, showCropModal, startCamera, currentCameraIndex]);
+  }, [isScannerStarted, isPaused, showCropModal, startCamera, stopCamera, currentCameraIndex]);
 
   // Optimized scan loop with throttled frame processing to guarantee fluid 60fps UI
   useEffect(() => {
@@ -581,8 +621,63 @@ export default function CameraScanner({ onScan, isPaused }: CameraScannerProps) 
         }`}
       />
 
+      {/* 1. Explicit Access Camera Overlay - Only requests and enables video when user explicitly clicks Start Scanner */}
+      {!isScannerStarted && (
+        <div
+          id="camera-access-initial-overlay"
+          className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-950 p-6 text-center z-30 animate-in fade-in duration-300 overflow-y-auto"
+        >
+          <div className="relative mb-5 flex items-center justify-center">
+            {/* Ambient glow */}
+            <div className="absolute w-24 h-24 bg-emerald-500/20 rounded-full blur-xl pointer-events-none" />
+            <div className="relative w-20 h-20 rounded-3xl bg-zinc-900 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shadow-2xl shadow-emerald-950/80">
+              <ScanLine className="w-10 h-10 text-emerald-400 animate-pulse" />
+            </div>
+            <div className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-emerald-500 text-zinc-950 flex items-center justify-center shadow-md">
+              <Play className="w-3 h-3 fill-current ml-0.5" />
+            </div>
+          </div>
+
+          <h2 className="text-white text-lg font-bold mb-1.5 tracking-tight">QR & Barcode Scanner</h2>
+          <p className="text-zinc-400 text-xs mb-6 max-w-xs leading-relaxed">
+            Instant real-time scanning with back-camera autofocus and continuous detection. Tap below to enable the camera stream.
+          </p>
+
+          <div className="flex flex-col gap-3 w-full max-w-xs">
+            <button
+              id="btn-start-scanner"
+              type="button"
+              onClick={handleStartScanner}
+              className="w-full py-4 bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 rounded-2xl text-sm font-bold transition-all flex items-center justify-center gap-2 shadow-xl shadow-emerald-950/60 active:scale-95 cursor-pointer"
+            >
+              <Camera className="w-4 h-4" />
+              <span>Start Scanner</span>
+            </button>
+
+            <button
+              id="btn-scan-gallery-initial"
+              type="button"
+              onClick={() => {
+                playClickFeedback();
+                triggerHaptic(25);
+                fileInputRef.current?.click();
+              }}
+              className="w-full py-3.5 bg-zinc-900 hover:bg-zinc-800 active:bg-zinc-700 text-zinc-300 hover:text-white rounded-2xl text-xs font-semibold transition-all flex items-center justify-center gap-2 border border-zinc-800 active:scale-95 cursor-pointer"
+            >
+              <ImageIcon className="w-4 h-4 text-emerald-400" />
+              <span>Scan QR from Photo Gallery</span>
+            </button>
+          </div>
+
+          <div className="mt-6 flex items-center gap-1.5 text-[11px] text-zinc-500">
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-500/80" />
+            <span>Privacy guaranteed: Camera only runs on active scan.</span>
+          </div>
+        </div>
+      )}
+
       {/* Camera loading state */}
-      {hasPermission === null && (
+      {isScannerStarted && hasPermission === null && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-950 text-zinc-300 gap-3 z-20">
           <div className="w-10 h-10 border-3 border-emerald-500 border-t-transparent rounded-full animate-spin" />
           <p className="text-sm font-medium tracking-wide">Starting Camera...</p>
@@ -590,7 +685,7 @@ export default function CameraScanner({ onScan, isPaused }: CameraScannerProps) 
       )}
 
       {/* Initial 'Request Camera' UI if browser is in prompt state and user hasn't granted yet */}
-      {hasPermission === false && permissionState === 'prompt' && (
+      {isScannerStarted && hasPermission === false && permissionState === 'prompt' && (
         <div id="camera-request-prompt-card" className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-950 p-6 text-center z-20 overflow-y-auto">
           <div className="relative mb-4">
             <div className="w-16 h-16 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 flex items-center justify-center shadow-lg shadow-emerald-950/50">
@@ -630,7 +725,7 @@ export default function CameraScanner({ onScan, isPaused }: CameraScannerProps) 
       )}
 
       {/* Camera error or permission denied */}
-      {hasPermission === false && permissionState !== 'prompt' && (
+      {isScannerStarted && hasPermission === false && permissionState !== 'prompt' && (
         <div id="camera-permission-fallback" className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-950 p-5 text-center z-20 overflow-y-auto">
           <div className="w-14 h-14 rounded-full bg-red-500/10 border border-red-500/20 text-red-400 flex items-center justify-center mb-3 shrink-0 shadow-lg shadow-red-950/40">
             <AlertCircle className="w-7 h-7" />
