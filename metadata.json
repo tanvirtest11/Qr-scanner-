@@ -1,0 +1,10 @@
+{
+  "name": "QR Code Scanner",
+  "description": "A fast, straightforward QR code scanner to scan from camera or image file, display decoded text and open links instantly.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
